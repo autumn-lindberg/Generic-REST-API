@@ -1,0 +1,20 @@
+GENERIC API DOC
+
+ENDPOINTS
+  GET
+    /genres
+    /genres/entry
+
+  POST
+    /genres
+
+  PUT
+    /genres
+
+  DELETE
+    /genres/entry
+
+SEARCH TYPES ( /api?searchType= )
+  GENRES
+    id (admin only)
+    name

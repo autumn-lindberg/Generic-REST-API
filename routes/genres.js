@@ -1,20 +1,12 @@
-const Joi = require("joi");
+const mongoose = require("mongoose");
 const express = require("express");
 const router = express.Router();
-
-// get data from database
-const { genres } = require("../fakeGenreService");
-
-// define schema
-const genresSchema = Joi.object({
-  _id: Joi.string().required(),
-  name: Joi.string().required(),
-});
-
-let dataSet = genres;
-let searchType = "name";
-let schema = genresSchema;
-const apiEndpoint = "genres";
+const {
+  genresSearchType,
+  genresSchema,
+  genresDBschema,
+  evaluateSearchType,
+} = require("../models/genre");
 
 // validate data using joi
 function validateData(data, schema) {
@@ -29,29 +21,48 @@ function validateData(data, schema) {
   return schema.validate(data);
 }
 
+////// CONFIGURATION SETTINGS ////////
+const apiEndpoint = "genres";
+let searchType = genresSearchType;
+let schema = genresSchema;
+let db_schema = genresDBschema;
+let collection = "Genres";
+/////////////////////////////////////
+
+// create model for DB schema
+const Data = mongoose.model(collection, db_schema);
+
 // get entire dataset
-router.get("/", (request, response) => {
-  return response.send(genres);
+router.get("/", async (request, response) => {
+  try {
+    // contact database
+    const dataset = await Data.find();
+    // send data back to client
+    return response.send(dataset);
+  } catch (exception) {
+    console.log("Exception: ", exception);
+    response.status(400).send("error");
+  }
 });
 
 // get individual entry
-router.get("/:entry", (request, response) => {
+router.get("/:entry", async (request, response) => {
   const { entry } = request.params;
+  const { searchBy } = request.query;
+  searchType = evaluateSearchType(searchBy);
 
-  // if dataset not found or search prop not found, return 404
-  if (!dataSet || !searchType)
-    return response
-      .status(404)
-      .send(`Error 404: ${apiEndpoint}/${entry} Not Found`);
-
-  // otherwise assume dataset is valid. search it.
-  // search through dataset array to find if something matches
-  const data = dataSet.find((data) => {
-    return data[searchType] === entry;
-  });
+  try {
+    // contact datbase and look for entry
+    const data = await Data.findOne({
+      [searchType]: entry,
+    });
+  } catch (exception) {
+    console.log("Exception: ", exception);
+    response.status(400).send("error");
+  }
 
   // if data set is valid but entry is not found
-  if (!data)
+  if (!data || data.length === 0)
     return response
       .status(404)
       .send(`Error 404: ${apiEndpoint}/${entry} Not Found`);
@@ -60,22 +71,25 @@ router.get("/:entry", (request, response) => {
 });
 
 // generic post to dataset
-router.post("/", (request, response) => {
-  const data = request.body;
+router.post("/", async (request, response) => {
+  const body = request.body;
 
-  // If data set is not found
-  if (!schema || !dataSet)
-    return response.status(404).send(`Error 404: ${apiEndpoint} Not Found`);
-
-  // otherwise assume good endpoint. validate data.
-  const result = validateData(data, schema);
-
-  // otherwise assume good data
+  // validate data.
+  const result = validateData(body, schema);
+  // see if error was returned
   const { error } = result;
   if (error) return response.status(400).send(error.details[0].message);
 
-  // contact database and POST updated array
-  dataSet.push(data);
+  // create new object to send to DB
+  const data = new Data(body);
+
+  try {
+    // sned data to DB
+    const answer = await data.save();
+  } catch (exception) {
+    console.log("Exception: ", exception);
+    response.status(400).send("error");
+  }
 
   // send data back
   response.send(data);
@@ -86,30 +100,45 @@ router.post("/:entry", (request, response) => {
   response.status(404).send("Error 404: Path Provided Is Longer Than Expected");
 });
 
-router.put("/", (request, response) => {
+router.put("/", async (request, response) => {
   const data = request.body;
+  const { searchBy } = request.query;
+  searchType = evaluateSearchType(searchBy);
 
-  // otherwise assume good endpoint. validate data.
+  // validate data.
   const result = validateData(data, schema);
-
-  // otherwise assume good data
+  // see if error was returned
   const { error } = result;
   if (error) return response.status(400).send(error.details[0].message);
 
-  // find data in dataset
-  const foundData = dataSet.find((item) => {
-    return item[searchType] === data[searchType];
-  });
-  if (!foundData) return response.send(`Error 404: ${searchType} not found.`);
+  try {
+    // try to contact DB
+    const foundData = await Data.findOne({
+      [searchType]: data[searchType],
+    });
+    if (!foundData) return response.send(`Error 404: ${searchType} not found.`);
+  } catch (exception) {
+    console.log("Exception: ", exception);
+    response.status(400).send("error");
+  }
 
   // set properties to those found in body of request
-  Object.keys(foundData).forEach((prop) => {
-    foundData[prop] = data[prop];
+  Object.keys(foundData.toObject()).forEach((prop) => {
+    // only set property if it was defined in body
+    if (data[prop]) {
+      foundData[prop] = data[prop];
+    }
   });
 
-  // contact database and POST updated array
+  try {
+    // contact DB to update item
+    const answer = await foundData.save();
+  } catch (exception) {
+    console.log("Exception: ", exception);
+    response.status(400).send("error");
+  }
 
-  // send object back
+  // send original object back
   response.send(data);
 });
 
@@ -118,31 +147,33 @@ router.put("/:entry", (request, response) => {
   response.status(404).send("Error 404: Path Provided Is Longer Than Expected");
 });
 
-router.delete("/:entry", (request, response) => {
+router.delete("/:entry", async (request, response) => {
   const { entry } = request.params;
-  const sentData = request.body;
+  const { searchBy } = request.query;
+  searchType = evaluateSearchType(searchBy);
 
   // if data set is not found
-  if (!apiEndpoint || !dataSet || !searchType || !schema)
+  if (!apiEndpoint)
     response.status(404).send(`Error 404: ${apiEndpoint}/${entry} Not Found`);
 
-  // otherwise assume good endpoint. validate data.
-  const result = validateData(sentData, schema);
+  try {
+    // search data, grab a copy if found
+    const data = await Data.findOne({
+      [searchType]: entry,
+    });
+    // send 404 if not found
+    if (!data) {
+      return response.status(404).send(`Error 404: ${searchType} not found.`);
+    }
 
-  // otherwise assume good data
-  const { error } = result;
-  if (error) return response.status(400).send(error.details[0].message);
-
-  // find data in dataset
-  const data = dataSet.find((data) => {
-    return data[searchType] === sentData[searchType];
-  });
-  if (!data)
-    return response.status(404).send(`Error 404: ${searchType} not found.`);
-
-  // contact database and POST updated array
-  const index = dataSet.indexOf(data);
-  dataSet.splice(index, 1);
+    // contact database and delete if found
+    const answer = await Data.deleteOne({
+      [searchType]: entry,
+    });
+  } catch (exception) {
+    console.log("Exception: ", exception);
+    response.status(400).send("error");
+  }
 
   // send data back
   response.send(data);
